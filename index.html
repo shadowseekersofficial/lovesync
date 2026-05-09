@@ -205,18 +205,20 @@
   <!-- SIGNUP -->
   <div id="signup-form">
     <div class="info-box">
-      <p>🔒 <strong>Room Password</strong> is your encryption key. Both partners must use the <strong>exact same</strong> Room Password. Even we can't read your data without it.</p>
+      <p>🔒 <strong>Room Password</strong> is your E2E encryption key. Both partners must use the <strong>exact same</strong> Room Password. Even we can't read your data without it.</p>
     </div>
     <div class="form-group"><label>Your Name</label><input type="text" id="su-name" placeholder="e.g. Aanya"/></div>
-    <div class="form-group"><label>Username</label><input type="text" id="su-user" placeholder="e.g. aanya22 (share with partner)"/></div>
+    <div class="form-group"><label>Username <small style="font-weight:400;color:var(--muted)">(share this with your partner)</small></label><input type="text" id="su-user" placeholder="e.g. aanya22"/></div>
     <div class="form-group"><label>Account Password</label><input type="password" id="su-pass" placeholder="Your login password"/></div>
+    <div class="form-group"><label>Confirm Account Password</label><input type="password" id="su-pass2" placeholder="Repeat your login password"/></div>
     <div class="form-group"><label>Partner's Username</label><input type="text" id="su-pair" placeholder="Your partner's username"/></div>
     <div class="form-group">
-      <label>🔑 Room Password (shared secret)</label>
-      <input type="password" id="su-room" placeholder="Both of you must use this same password"/>
-      <small style="color:var(--muted);font-size:12px;margin-top:4px;display:block">⚠️ If you forget this, data cannot be recovered. Write it somewhere safe.</small>
+      <label>🔑 Room Password <small style="font-weight:400;color:var(--muted)">(shared encryption key)</small></label>
+      <input type="password" id="su-room" placeholder="Decide this together with your partner"/>
+      <small style="color:var(--muted);font-size:12px;margin-top:4px;display:block">⚠️ Both of you must enter the exact same Room Password. If forgotten, data cannot be recovered.</small>
     </div>
-    <button class="btn" style="width:100%" id="signup-btn" onclick="doSignup()">Create Account 💝</button>
+    <div class="form-group"><label>🔑 Confirm Room Password</label><input type="password" id="su-room2" placeholder="Repeat the room password"/></div>
+    <button class="btn" style="width:100%;margin-top:4px" id="signup-btn" onclick="doSignup()">Create Account 💝</button>
   </div>
 
   <!-- LOGIN -->
@@ -634,27 +636,44 @@ window.switchAuth = function(mode) {
 
 window.doSignup = async function() {
   const name = document.getElementById('su-name').value.trim();
-  const user = document.getElementById('su-user').value.trim().toLowerCase();
+  const user = document.getElementById('su-user').value.trim().toLowerCase().replace(/\s+/g,'');
   const pass = document.getElementById('su-pass').value;
-  const pair = document.getElementById('su-pair').value.trim().toLowerCase();
+  const pass2 = document.getElementById('su-pass2').value;
+  const pair = document.getElementById('su-pair').value.trim().toLowerCase().replace(/\s+/g,'');
   const room = document.getElementById('su-room').value;
-  if (!name || !user || !pass || !pair || !room) { toast('Fill all fields 💕'); return; }
+  const room2 = document.getElementById('su-room2').value;
+
+  // Validations
+  if (!name || !user || !pass || !pass2 || !pair || !room || !room2) {
+    toast('Please fill all fields 💕'); return;
+  }
+  if (user === pair) { toast("Partner username can't be same as yours 😅"); return; }
+  if (pass !== pass2) { toast('Account passwords do not match 💔'); return; }
+  if (pass.length < 6) { toast('Account password must be at least 6 characters'); return; }
+  if (room !== room2) { toast('Room passwords do not match 🔑'); return; }
+  if (room.length < 6) { toast('Room password must be at least 6 characters 🔑'); return; }
 
   setBtnLoading('signup-btn', true);
   setSyncStatus('syncing');
 
   try {
     // Check if username already taken
-    const userDoc = await getDoc(doc(db, 'users', user));
-    if (userDoc.exists()) { toast('Username taken — try another!'); setBtnLoading('signup-btn', false); return; }
+    let existingUser;
+    try { existingUser = await getDoc(doc(db, 'users', user)); }
+    catch(e) { throw new Error('Cannot reach database. Check your internet connection.'); }
+
+    if (existingUser.exists()) {
+      toast('Username already taken — try another!');
+      setBtnLoading('signup-btn', false);
+      return;
+    }
 
     const coupleId = makeCoupleId(user, pair);
-
-    // Derive encryption key
     encKey = await deriveKey(room, coupleId);
 
-    // Store user profile (password hashed — we use a simple hash for demo; production use Firebase Auth)
     const passHash = await hashStr(pass);
+
+    // Write user doc
     await setDoc(doc(db, 'users', user), {
       name: await encrypt(name),
       user,
@@ -666,28 +685,35 @@ window.doSignup = async function() {
     });
 
     // Create couple doc if not exists
-    const coupleRef = doc(db, 'couples', coupleId);
-    const coupleDoc = await getDoc(coupleRef);
-    if (!coupleDoc.exists()) {
-      await setDoc(coupleRef, { members: [user, pair], createdAt: serverTimestamp() });
-    }
+    try {
+      const coupleRef = doc(db, 'couples', coupleId);
+      const coupleSnap = await getDoc(coupleRef);
+      if (!coupleSnap.exists()) {
+        await setDoc(coupleRef, { members: [user, pair], createdAt: serverTimestamp() });
+      }
+    } catch(e) { /* couple doc creation optional, ignore */ }
 
-    // Save session locally
     localStorage.setItem('ls_session', JSON.stringify({ user, room, coupleId }));
-
     S.user = user; S.name = name; S.partner = pair; S.coupleId = coupleId;
     await loadPartnerName();
     launchApp();
   } catch(e) {
-    console.error(e);
-    toast('Error: ' + e.message);
+    console.error('Signup error:', e);
+    // Friendly error messages
+    let msg = e.message || 'Something went wrong';
+    if (msg.includes('permission') || msg.includes('PERMISSION_DENIED')) {
+      msg = 'Database permission error — update Firestore Rules to allow read/write';
+    } else if (msg.includes('offline') || msg.includes('network')) {
+      msg = 'No internet connection 📶';
+    }
+    toast('Error: ' + msg);
     setBtnLoading('signup-btn', false);
     setSyncStatus('offline');
   }
 };
 
 window.doLogin = async function() {
-  const user = document.getElementById('li-user').value.trim().toLowerCase();
+  const user = document.getElementById('li-user').value.trim().toLowerCase().replace(/\s+/g,'');
   const pass = document.getElementById('li-pass').value;
   const room = document.getElementById('li-room').value;
   if (!user || !pass || !room) { toast('Fill all fields 💕'); return; }
@@ -696,28 +722,52 @@ window.doLogin = async function() {
   setSyncStatus('syncing');
 
   try {
-    const userDoc = await getDoc(doc(db, 'users', user));
-    if (!userDoc.exists()) { toast('User not found 💔'); setBtnLoading('login-btn', false); return; }
+    let userDoc;
+    try {
+      userDoc = await getDoc(doc(db, 'users', user));
+    } catch(e) {
+      let msg = 'Cannot reach database.';
+      if (e.message && e.message.includes('permission')) {
+        msg = 'Database rules error — go to Firebase Console → Firestore → Rules and set to allow read, write: if true (for testing)';
+      }
+      toast(msg);
+      setBtnLoading('login-btn', false);
+      setSyncStatus('offline');
+      return;
+    }
+
+    if (!userDoc.exists()) {
+      toast('Username not found. Check spelling or sign up first 💔');
+      setBtnLoading('login-btn', false);
+      return;
+    }
 
     const data = userDoc.data();
     const passHash = await hashStr(pass);
-    if (passHash !== data.passHash) { toast('Wrong password 💔'); setBtnLoading('login-btn', false); return; }
+    if (passHash !== data.passHash) {
+      toast('Wrong account password 💔');
+      setBtnLoading('login-btn', false);
+      return;
+    }
 
     const coupleId = data.coupleId;
     encKey = await deriveKey(room, coupleId);
 
-    // Verify decryption works
+    // Verify room password by trying to decrypt name
     const decName = await decrypt(data.name);
-    if (decName.includes('[🔒')) { toast('Wrong room password — data cannot be decrypted 🔑'); setBtnLoading('login-btn', false); return; }
+    if (decName.includes('[🔒')) {
+      toast('Wrong Room Password — cannot decrypt your data 🔑');
+      setBtnLoading('login-btn', false);
+      return;
+    }
 
     localStorage.setItem('ls_session', JSON.stringify({ user, room, coupleId }));
-
     S.user = user; S.name = decName; S.partner = data.partner; S.coupleId = coupleId;
     await loadPartnerName();
     launchApp();
   } catch(e) {
-    console.error(e);
-    toast('Error: ' + e.message);
+    console.error('Login error:', e);
+    toast('Error: ' + (e.message || 'Something went wrong'));
     setBtnLoading('login-btn', false);
     setSyncStatus('offline');
   }
