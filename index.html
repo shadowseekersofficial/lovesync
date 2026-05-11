@@ -1539,8 +1539,26 @@ window.doLogin = async function() {
     const cId = pending ? ('pending__' + user) : coupleId;
 
     encKey = await deriveKey(enc, cId);
-    const decName = await decrypt(data.name);
-    if (decName.includes('[🔒')) { toast('Wrong Encryption Key 🔑'); setBtnLoading('login-btn', false); return; }
+    let decName = await decrypt(data.name);
+
+    // Legacy fix: if decryption failed and this is an active (non-pending) account,
+    // the name was encrypted with the old pending__ salt — try that and auto-migrate.
+    if (decName.includes('[🔒') && !pending) {
+      const oldKey = await deriveKey(enc, 'pending__' + user);
+      encKey = oldKey;
+      const decNameOld = await decrypt(data.name);
+      if (!decNameOld.includes('[🔒')) {
+        // Correct key, name was just stuck on old salt — re-encrypt with real coupleId and save
+        encKey = await deriveKey(enc, cId);
+        const reEncrypted = await encrypt(decNameOld);
+        try { await updateDoc(doc(db,'users',user), { name: reEncrypted }); } catch(_) {}
+        decName = decNameOld;
+      } else {
+        toast('Wrong Encryption Key 🔑'); setBtnLoading('login-btn', false); return;
+      }
+    } else if (decName.includes('[🔒')) {
+      toast('Wrong Encryption Key 🔑'); setBtnLoading('login-btn', false); return;
+    }
 
     localStorage.setItem('ls_session', JSON.stringify({ user, enc, coupleId: cId, pending }));
     S.user = user; S.name = decName; S.partner = data.partner; S.coupleId = cId;
@@ -1581,8 +1599,23 @@ async function tryRestoreSession() {
     if (!userDoc.exists()) { hideLoading(); showWelcome(); return; }
     const data = userDoc.data();
     encKey = await deriveKey(enc, coupleId);
-    const decName = await decrypt(data.name);
-    if (decName.includes('[🔒')) { localStorage.removeItem('ls_session'); hideLoading(); showWelcome(); return; }
+    let decName = await decrypt(data.name);
+    // Legacy fix: fall back to pending__ salt for old accounts
+    if (decName.includes('[🔒') && !pending) {
+      const oldKey = await deriveKey(enc, 'pending__' + user);
+      encKey = oldKey;
+      const decNameOld = await decrypt(data.name);
+      if (!decNameOld.includes('[🔒')) {
+        encKey = await deriveKey(enc, coupleId);
+        const reEncrypted = await encrypt(decNameOld);
+        try { await updateDoc(doc(db,'users',user), { name: reEncrypted }); } catch(_) {}
+        decName = decNameOld;
+      } else {
+        localStorage.removeItem('ls_session'); hideLoading(); showWelcome(); return;
+      }
+    } else if (decName.includes('[🔒')) {
+      localStorage.removeItem('ls_session'); hideLoading(); showWelcome(); return;
+    }
     S.user = user; S.name = decName; S.partner = data.partner; S.coupleId = coupleId;
     if (!pending && data.partner) await loadPartnerName();
     launchApp(!!pending);
